@@ -1,6 +1,7 @@
 package phttp
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,7 +11,7 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// DefaultBackOff is an opinionated backoff.ExponentialBackOff.
+// DefaultBackOff is an opinionated backoff.ExponentialBackOff which implements the backoff.BackOff interface.
 var DefaultBackOff = backoff.ExponentialBackOff{
 	InitialInterval:     500 * time.Millisecond,
 	RandomizationFactor: 0.5,
@@ -21,29 +22,46 @@ var DefaultBackOff = backoff.ExponentialBackOff{
 	Clock:               backoff.SystemClock,
 }
 
-// DefaultRateLimiter is an opinionated rate.Limiter.
+// DefaultRateLimiter is an opinionated rate.Limiter which implements the Waiter interface.
 var DefaultRateLimiter = rate.NewLimiter(rate.Limit(1), 1)
 
+// Client provides all required functionality for
+// 1. performing http requests with a Requester
+// 2. while not exceeding a defined rate limit with a Waiter
+// 3. temporary errors can be retried with a backoff.BackOff
 type Client struct {
-	HTTPClient  *http.Client
-	RateLimiter *rate.Limiter
-	Backoff     backoff.BackOff
+	Requester Requester
+	Waiter    Waiter
+	Backoff   backoff.BackOff
+}
+
+// Requester is this libraries interface for a http.Client.
+// This is due to https://github.com/golang/go/issues/16047
+type Requester interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
+// Waiter should block when Wait is called, until events are allowed to happen.
+// It should return an error if the Context is canceled, or the expected wait time exceeds the Context's Deadline.
+type Waiter interface {
+	Wait(ctx context.Context) error
 }
 
 // Option is a function to alter the behaviour of a Client.
 type Option func(c *Client)
 
-// WithHttpClient configures the Client to use the given http.Client.
-func WithHttpClient(httpClient *http.Client) Option {
+// WithHttpClient configures the Client to use the given Requester.
+// http.DefaultClient implements the Requester interface.
+func WithHttpClient(requester Requester) Option {
 	return func(c *Client) {
-		c.HTTPClient = httpClient
+		c.Requester = requester
 	}
 }
 
-// WithRateLimiter configures the Client to use the given rate.Limiter.
-func WithRateLimiter(limiter *rate.Limiter) Option {
+// WithRateLimiter configures the Client to use the given Waiter.
+func WithRateLimiter(waiter Waiter) Option {
 	return func(c *Client) {
-		c.RateLimiter = limiter
+		c.Waiter = waiter
 	}
 }
 
@@ -57,9 +75,9 @@ func WithBackOff(bo backoff.BackOff) Option {
 // New creates a Client and accepts Options to configure it.
 func New(opts ...Option) *Client {
 	client := &Client{
-		HTTPClient:  http.DefaultClient,
-		RateLimiter: nil,
-		Backoff:     nil,
+		Requester: http.DefaultClient,
+		Waiter:    nil,
+		Backoff:   nil,
 	}
 
 	for _, opt := range opts {
@@ -113,14 +131,14 @@ func (e HTTPError) Error() string {
 }
 
 func (c *Client) do(req *http.Request) (*http.Response, error) {
-	if c.RateLimiter != nil {
-		err := c.RateLimiter.Wait(req.Context())
+	if c.Waiter != nil {
+		err := c.Waiter.Wait(req.Context())
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.Requester.Do(req)
 	if err != nil {
 		return nil, err
 	}
