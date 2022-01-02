@@ -1,4 +1,4 @@
-module github.com/deichindianer/pbhttp
+module github.com/deichindianer/phttp
 
 go 1.17
 
