@@ -72,6 +72,12 @@ func WithBackOff(bo backoff.BackOff) Option {
 	}
 }
 
+// NewWithDefaults returns a client with the two default options for rate
+// limiting and backoff DefaultRateLimiter and DefaultBackOff
+func NewWithDefaults() *Client {
+	return New(WithRateLimiter(DefaultRateLimiter), WithBackOff(&DefaultBackOff))
+}
+
 // New creates a Client and accepts Options to configure it.
 func New(opts ...Option) *Client {
 	client := &Client{
