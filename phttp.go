@@ -94,12 +94,12 @@ func New(opts ...Option) *Client {
 }
 
 // Do is the interface for http.Client.Do.
-func (c *Client) Do(req *http.Request) (*http.Response, error) {
+func (c *Client) Do(req *http.Request) (*HTTPResponse, error) {
 	if c.Backoff == nil {
 		return c.do(req)
 	}
 
-	var resp *http.Response
+	var resp *HTTPResponse
 
 	operation := func() error {
 		var err error
@@ -123,20 +123,22 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 // HTTPError exposes the http.Response while also giving some convenience for the http status code & response body.
 type HTTPError struct {
 	Code     int
-	Body     string
+	Body     []byte
 	Response *http.Response
 }
 
-// Error will print the http status code and optionally the http response body.
+// Error will print the http status code.
 func (e HTTPError) Error() string {
-	if e.Body != "" {
-		return fmt.Sprintf("failed HTTP call: %d: %s", e.Code, e.Body)
-	}
-
 	return fmt.Sprintf("failed HTTP call: %d", e.Code)
 }
 
-func (c *Client) do(req *http.Request) (*http.Response, error) {
+type HTTPResponse struct {
+	Code     int
+	Body     []byte
+	Response *http.Response
+}
+
+func (c *Client) do(req *http.Request) (*HTTPResponse, error) {
 	if c.Waiter != nil {
 		err := c.Waiter.Wait(req.Context())
 		if err != nil {
@@ -148,21 +150,30 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 
-	if resp.StatusCode > 399 && resp.StatusCode < 500 {
-		bodyBytes, err := readHTTPBody(resp.Body)
-		if err != nil {
-			return nil, backoff.Permanent(HTTPError{
-				Code:     resp.StatusCode,
-				Response: resp,
-			})
-		}
-
+	bodyBytes, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
 		return nil, backoff.Permanent(HTTPError{
 			Code:     resp.StatusCode,
-			Body:     string(bodyBytes),
 			Response: resp,
 		})
+	}
+
+	if resp.StatusCode > 399 && resp.StatusCode < 500 {
+		return nil, backoff.Permanent(HTTPError{
+			Code:     resp.StatusCode,
+			Body:     bodyBytes,
+			Response: resp,
+		})
+	}
+
+	if resp.StatusCode > 499 {
+		return nil, HTTPError{
+			Code:     resp.StatusCode,
+			Body:     bodyBytes,
+			Response: resp,
+		}
 	}
 
 	//TODO: Add Retry-After parsing if it's existing
@@ -172,10 +183,9 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 	// that should put us either right on or slightly above the
 	// desired value of the system.
 	// Max wait time would be Retry-After + c.EBackoff.MaxInterval
-	return resp, nil
-}
-
-func readHTTPBody(bodyReader io.ReadCloser) ([]byte, error) {
-	defer bodyReader.Close()
-	return io.ReadAll(bodyReader)
+	return &HTTPResponse{
+		Code:     resp.StatusCode,
+		Body:     bodyBytes,
+		Response: resp,
+	}, nil
 }
